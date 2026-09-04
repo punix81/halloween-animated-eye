@@ -115,17 +115,29 @@ const char* GIF_PATH = "/eye.gif";
 
 Si vous utilisez d’autres broches, modifiez ces valeurs avant le téléversement.
 
-## Structure recommandée du dépôt GitHub
+## Architecture du dépôt
 
 ```text
 halloween_Globe_eye/
+├── assets/
+│   └── gifs/
+│       ├── README.md
+│       └── eye.gif
+├── docs/
+│   └── README.md
+├── .gitignore
 ├── halloween_Globe_eye.ino
-├── README.md
-└── assets/
-    └── eye.gif
+└── README.md
 ```
 
-Le fichier `eye.gif` peut être placé dans `assets/` pour documenter le projet sur GitHub, mais il doit être copié à la racine de la carte microSD pour fonctionner avec le sketch.
+Rôle des dossiers :
+
+- `halloween_Globe_eye.ino` : sketch Arduino principal. Il reste à la racine car Arduino IDE attend souvent le fichier `.ino` dans le dossier du projet.
+- `assets/gifs/` : sauvegarde des GIFs utilisés par le projet.
+- `docs/` : photos de montage, schémas de câblage, notes de boîtier ou documentation complémentaire.
+- `.gitignore` : exclut les fichiers locaux inutiles comme la configuration IDE.
+
+Important : le GIF sauvegardé dans `assets/gifs/` sert d’archive pour GitHub. Pour faire fonctionner le montage, copiez le GIF voulu à la racine de la carte microSD et renommez-le exactement `eye.gif`.
 
 ## Dépannage
 
