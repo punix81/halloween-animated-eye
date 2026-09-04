@@ -1,5 +1,7 @@
 #include <SPI.h>
 #include <SD.h>
+#include <WiFi.h>
+#include <WebServer.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_GC9A01A.h>
 #include <AnimatedGIF.h>
@@ -37,6 +39,18 @@ const char* GIF_PATH = "/eye.gif";
 const uint16_t GIF_RESTART_DELAY_MS = 10;
 
 // ============================================================
+// Point d'acces Wi-Fi
+// ============================================================
+
+const char WIFI_AP_SSID[] = "DemonEye";
+const char WIFI_AP_PASSWORD[] = "DemonEye2026";
+static_assert(sizeof(WIFI_AP_PASSWORD) >= 9, "Le mot de passe Wi-Fi AP doit contenir au moins 8 caracteres.");
+
+WebServer server(80);
+
+IPAddress adresseIP;
+
+// ============================================================
 // Decodeur GIF
 // ============================================================
 
@@ -44,11 +58,101 @@ AnimatedGIF gif;
 File gifFile;
 
 bool gifActif = false;
+bool lectureEnPause = false;
+bool carteSDDisponible = false;
+bool gifDisponible = false;
 int16_t gifOffsetX = 0;
 int16_t gifOffsetY = 0;
+int16_t gifLargeur = 0;
+int16_t gifHauteur = 0;
+uint32_t gifTailleOctets = 0;
+uint32_t prochaineFrameMs = 0;
 
 // Le GC9A01 fait 240 pixels de large.
 uint16_t lignePixels[240];
+
+// ============================================================
+// Interface web
+// ============================================================
+
+const char PAGE_HTML[] PROGMEM = R"rawliteral(
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DemonEye</title>
+  <style>
+    :root{color-scheme:dark;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#09060d;color:#f5e9ff}
+    body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at top,#35114b,#09060d 55%)}
+    main{width:min(92vw,680px);padding:24px}
+    .card{border:1px solid #3b254f;border-radius:22px;background:rgba(11,8,18,.86);box-shadow:0 22px 70px rgba(0,0,0,.45);overflow:hidden}
+    header{padding:26px 24px;background:linear-gradient(135deg,#d1224b,#5d1ea6)}
+    h1{margin:0;font-size:clamp(2rem,8vw,4rem);line-height:.95;letter-spacing:-.05em}
+    p{margin:.7rem 0 0;color:#f1d6ff}
+    dl{display:grid;grid-template-columns:1fr 1fr;gap:1px;margin:0;background:#2b1d3a}
+    div.row{display:grid;gap:6px;padding:18px;background:#100b18}
+    dt{font-size:.78rem;text-transform:uppercase;letter-spacing:.08em;color:#b69bcf}
+    dd{margin:0;font-size:1.2rem;font-weight:700;overflow-wrap:anywhere}
+    button{width:100%;border:0;border-radius:16px;margin-top:18px;padding:16px 18px;background:#ff315f;color:white;font-weight:800;font-size:1rem}
+    .ok{color:#52f29a}.bad{color:#ff6b6b}.muted{color:#b69bcf}
+    @media (max-width:560px){dl{grid-template-columns:1fr}main{padding:14px}}
+  </style>
+</head>
+<body>
+  <main>
+    <section class="card">
+      <header>
+        <h1>DemonEye</h1>
+        <p>Interface Wi-Fi locale de l'œil Halloween</p>
+      </header>
+      <dl>
+        <div class="row"><dt>Carte SD</dt><dd id="sd" class="muted">...</dd></div>
+        <div class="row"><dt>GIF actif</dt><dd id="gif" class="muted">...</dd></div>
+        <div class="row"><dt>Dimensions</dt><dd id="dim" class="muted">...</dd></div>
+        <div class="row"><dt>Taille fichier</dt><dd id="size" class="muted">...</dd></div>
+        <div class="row"><dt>Mémoire libre</dt><dd id="heap" class="muted">...</dd></div>
+        <div class="row"><dt>Adresse IP</dt><dd id="ip" class="muted">...</dd></div>
+        <div class="row"><dt>État</dt><dd id="state" class="muted">...</dd></div>
+      </dl>
+    </section>
+    <button id="toggle" type="button">Lecture / pause</button>
+  </main>
+  <script>
+    const fields = {
+      sd: document.querySelector('#sd'),
+      gif: document.querySelector('#gif'),
+      dim: document.querySelector('#dim'),
+      size: document.querySelector('#size'),
+      heap: document.querySelector('#heap'),
+      ip: document.querySelector('#ip'),
+      state: document.querySelector('#state'),
+      toggle: document.querySelector('#toggle')
+    };
+    function bytes(value){return value ? `${value.toLocaleString('fr-CH')} octets` : '-'}
+    async function refresh(){
+      const res = await fetch('/api/status',{cache:'no-store'});
+      const s = await res.json();
+      fields.sd.textContent = s.sd ? 'Disponible' : 'Indisponible';
+      fields.sd.className = s.sd ? 'ok' : 'bad';
+      fields.gif.textContent = s.gifName;
+      fields.dim.textContent = s.gifWidth && s.gifHeight ? `${s.gifWidth} × ${s.gifHeight}px` : '-';
+      fields.size.textContent = bytes(s.gifSize);
+      fields.heap.textContent = bytes(s.freeHeap);
+      fields.ip.textContent = s.ip;
+      fields.state.textContent = s.paused ? 'Pause' : 'Lecture';
+      fields.state.className = s.paused ? 'bad' : 'ok';
+    }
+    fields.toggle.addEventListener('click', async () => {
+      await fetch('/api/toggle', {method:'POST'});
+      refresh();
+    });
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>
+)rawliteral";
 
 // ============================================================
 // Acces au fichier GIF sur la carte SD
@@ -214,11 +318,114 @@ void afficherErreur(const char* ligne1, const char* ligne2) {
   tft.println(ligne2);
 }
 
+void afficherAdresseIP() {
+  tft.fillScreen(GC9A01A_BLACK);
+  tft.drawCircle(120, 120, 115, GC9A01A_CYAN);
+  tft.drawCircle(120, 120, 114, GC9A01A_CYAN);
+
+  tft.setTextWrap(false);
+  tft.setTextColor(GC9A01A_CYAN);
+  tft.setTextSize(2);
+  tft.setCursor(42, 72);
+  tft.println("Wi-Fi AP");
+
+  tft.setTextSize(1);
+  tft.setCursor(34, 110);
+  tft.println(WIFI_AP_SSID);
+
+  tft.setTextSize(2);
+  tft.setCursor(42, 138);
+  tft.println(adresseIP);
+}
+
+void envoyerPageAccueil() {
+  server.send_P(200, "text/html", PAGE_HTML);
+}
+
+void envoyerEtatJSON() {
+  char reponse[384];
+  char ipTexte[16];
+
+  snprintf(
+    ipTexte,
+    sizeof(ipTexte),
+    "%u.%u.%u.%u",
+    adresseIP[0],
+    adresseIP[1],
+    adresseIP[2],
+    adresseIP[3]
+  );
+
+  snprintf(
+    reponse,
+    sizeof(reponse),
+    "{\"sd\":%s,\"gifName\":\"%s\",\"gifWidth\":%d,\"gifHeight\":%d,"
+    "\"gifSize\":%lu,\"freeHeap\":%lu,\"ip\":\"%s\",\"paused\":%s,"
+    "\"gifActive\":%s}",
+    carteSDDisponible ? "true" : "false",
+    GIF_PATH,
+    gifLargeur,
+    gifHauteur,
+    static_cast<unsigned long>(gifTailleOctets),
+    static_cast<unsigned long>(ESP.getFreeHeap()),
+    ipTexte,
+    lectureEnPause ? "true" : "false",
+    gifActif ? "true" : "false"
+  );
+
+  server.send(200, "application/json", reponse);
+}
+
+void basculerLecture() {
+  lectureEnPause = !lectureEnPause;
+
+  if (!lectureEnPause) {
+    prochaineFrameMs = millis();
+  }
+
+  envoyerEtatJSON();
+}
+
+void envoyerIntrouvable() {
+  server.send(404, "text/plain", "Route introuvable");
+}
+
+void demarrerWiFi() {
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASSWORD);
+  adresseIP = WiFi.softAPIP();
+
+  server.on("/", HTTP_GET, envoyerPageAccueil);
+  server.on("/api/status", HTTP_GET, envoyerEtatJSON);
+  server.on("/api/toggle", HTTP_POST, basculerLecture);
+  server.onNotFound(envoyerIntrouvable);
+  server.begin();
+
+  Serial.print("Point d'acces Wi-Fi : ");
+  Serial.println(WIFI_AP_SSID);
+  Serial.print("Adresse IP : ");
+  Serial.println(adresseIP);
+}
+
+void attendreAvecServeur(uint32_t dureeMs) {
+  uint32_t depart = millis();
+
+  while (millis() - depart < dureeMs) {
+    server.handleClient();
+    delay(1);
+  }
+}
+
 // ============================================================
 // Ouverture et demarrage de l'animation
 // ============================================================
 
 bool lancerGIF() {
+  if (!gifDisponible) {
+    gifActif = false;
+    return false;
+  }
+
   if (!gif.open(
         GIF_PATH,
         ouvrirFichierGIF,
@@ -234,6 +441,8 @@ bool lancerGIF() {
 
   int16_t largeur = gif.getCanvasWidth();
   int16_t hauteur = gif.getCanvasHeight();
+  gifLargeur = largeur;
+  gifHauteur = hauteur;
 
   Serial.printf("Dimensions du GIF : %d x %d\n", largeur, hauteur);
 
@@ -255,6 +464,7 @@ bool lancerGIF() {
   tft.fillScreen(GC9A01A_BLACK);
 
   gifActif = true;
+  prochaineFrameMs = millis();
   Serial.println("Animation lancee en SPI materiel.");
 
   return true;
@@ -299,36 +509,46 @@ void setup() {
   tft.setCursor(42, 110);
   tft.println("Chargement...");
 
+  demarrerWiFi();
+  afficherAdresseIP();
+  attendreAvecServeur(2500);
+
   Serial.println("Initialisation de la carte SD a 10 MHz...");
 
   if (!SD.begin(SD_CS, SPI, SD_FREQUENCY)) {
     Serial.println("ERREUR : carte SD inaccessible.");
     afficherErreur("ERREUR", "Carte SD inaccessible");
-    return;
+  } else {
+    carteSDDisponible = true;
+    Serial.println("Carte SD initialisee.");
   }
 
-  Serial.println("Carte SD initialisee.");
-
-  if (!SD.exists(GIF_PATH)) {
+  if (carteSDDisponible && !SD.exists(GIF_PATH)) {
     Serial.println("ERREUR : /eye.gif introuvable.");
     afficherErreur("ERREUR", "eye.gif introuvable");
-    return;
+  } else if (carteSDDisponible) {
+    File test = SD.open(GIF_PATH, FILE_READ);
+
+    if (!test) {
+      Serial.println("ERREUR : ouverture de /eye.gif impossible.");
+      afficherErreur("ERREUR", "Ouverture GIF impossible");
+    } else {
+      gifTailleOctets = test.size();
+      gifDisponible = true;
+
+      Serial.printf(
+        "Taille du GIF : %u octets\n",
+        static_cast<unsigned int>(gifTailleOctets)
+      );
+
+      test.close();
+    }
   }
 
-  File test = SD.open(GIF_PATH, FILE_READ);
-
-  if (!test) {
-    Serial.println("ERREUR : ouverture de /eye.gif impossible.");
-    afficherErreur("ERREUR", "Ouverture GIF impossible");
+  if (!gifDisponible) {
+    Serial.println("Animation GIF inactive, serveur web disponible.");
     return;
   }
-
-  Serial.printf(
-    "Taille du GIF : %u octets\n",
-    static_cast<unsigned int>(test.size())
-  );
-
-  test.close();
 
   // Adafruit_GFX utilise les valeurs RGB565 natives de l'ESP32.
   gif.begin(LITTLE_ENDIAN_PIXELS);
@@ -343,20 +563,49 @@ void setup() {
 // ============================================================
 
 void loop() {
-  if (!gifActif) {
-    delay(1000);
+  server.handleClient();
+
+  if (lectureEnPause) {
+    delay(1);
     return;
   }
 
-  // true : respecter les delais contenus dans le GIF.
-  if (!gif.playFrame(true, nullptr)) {
+  uint32_t maintenant = millis();
+
+  if (!gifActif) {
+    if (
+      gifDisponible &&
+      static_cast<int32_t>(maintenant - prochaineFrameMs) >= 0
+    ) {
+      if (!lancerGIF()) {
+        afficherErreur("ERREUR", "Redemarrage GIF impossible");
+      }
+    }
+
+    delay(1);
+    return;
+  }
+
+  if (static_cast<int32_t>(maintenant - prochaineFrameMs) < 0) {
+    delay(1);
+    return;
+  }
+
+  int delaiFrameMs = 0;
+
+  // false : ne pas bloquer avec delay(); le rythme est gere avec millis().
+  if (!gif.playFrame(false, &delaiFrameMs)) {
     gif.close();
     gifActif = false;
-
-    delay(GIF_RESTART_DELAY_MS);
-
-    if (!lancerGIF()) {
-      afficherErreur("ERREUR", "Redemarrage GIF impossible");
+    prochaineFrameMs = millis() + GIF_RESTART_DELAY_MS;
+  } else {
+    if (delaiFrameMs < 1) {
+      delaiFrameMs = 1;
     }
+
+    prochaineFrameMs = millis() + delaiFrameMs;
   }
+
+  server.handleClient();
+  delay(1);
 }
