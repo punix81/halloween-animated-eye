@@ -42,6 +42,8 @@ const uint16_t GIF_RESTART_DELAY_MS = 10;
 const uint8_t MAX_GIFS = 16;
 const uint8_t GIF_NAME_MAX_LENGTH = 40;
 const uint8_t GIF_PATH_MAX_LENGTH = 80;
+const uint32_t MAX_UPLOAD_SIZE_BYTES = 10UL * 1024UL * 1024UL;
+const char* UPLOAD_TEMP_PATH = "/gifs/.upload.tmp";
 
 // ============================================================
 // Point d'acces Wi-Fi
@@ -66,6 +68,10 @@ bool gifActif = false;
 bool lectureEnPause = false;
 bool carteSDDisponible = false;
 bool gifDisponible = false;
+bool ecritureSDEnCours = false;
+bool uploadErreur = false;
+bool uploadOK = false;
+bool lectureEtaitEnPauseAvantUpload = false;
 int16_t gifOffsetX = 0;
 int16_t gifOffsetY = 0;
 int16_t gifLargeur = 0;
@@ -73,9 +79,17 @@ int16_t gifHauteur = 0;
 uint32_t gifTailleOctets = 0;
 uint32_t prochaineFrameMs = 0;
 uint8_t nombreGIFs = 0;
+uint8_t uploadSignatureOctets = 0;
 char gifActuel[GIF_PATH_MAX_LENGTH] = "/eye.gif";
 char dernierGIFValide[GIF_PATH_MAX_LENGTH] = "/eye.gif";
 char dernierMessage[120] = "Demarrage";
+char gifAvantEcriture[GIF_PATH_MAX_LENGTH] = "/eye.gif";
+char uploadCheminFinal[GIF_PATH_MAX_LENGTH] = "";
+char uploadNomFinal[GIF_NAME_MAX_LENGTH] = "";
+char uploadMessage[120] = "";
+uint8_t uploadSignature[6];
+
+File uploadFile;
 
 struct EntreeGIF {
   char nom[GIF_NAME_MAX_LENGTH];
@@ -86,9 +100,13 @@ struct EntreeGIF {
 EntreeGIF catalogueGIFs[MAX_GIFS];
 
 bool cheminGIFValide(const char* chemin);
+bool nomFichierGIFValide(const char* nom);
 int trouverGIFParChemin(const char* chemin);
 bool changerGIF(const char* chemin);
 bool lancerGIF(const char* chemin);
+void traiterUploadGIF();
+void terminerUploadGIF();
+void supprimerGIFDepuisWeb();
 
 // Le GC9A01 fait 240 pixels de large.
 uint16_t lignePixels[240];
@@ -120,12 +138,16 @@ const char PAGE_HTML[] PROGMEM = R"rawliteral(
     #toggle{width:100%;margin-top:18px;padding:16px 18px}
     .library{margin-top:18px;padding:18px;border:1px solid #3b254f;border-radius:18px;background:#100b18}
     .library h2{margin:0 0 12px;font-size:1.1rem}
-    .gif-row{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;padding:12px 0;border-top:1px solid #2b1d3a}
+    .gif-row{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;padding:12px 0;border-top:1px solid #2b1d3a}
     .gif-row:first-of-type{border-top:0}
     .gif-name{font-weight:800}.gif-meta{font-size:.85rem;color:#b69bcf;overflow-wrap:anywhere}
+    form{display:grid;gap:12px;margin-top:18px;padding-top:18px;border-top:1px solid #2b1d3a}
+    input[type=file]{width:100%;color:#f5e9ff}
+    progress{width:100%;height:18px}
+    .danger{background:#652034}
     .error{margin-top:14px;color:#ffb3c1;min-height:1.2rem}
     .ok{color:#52f29a}.bad{color:#ff6b6b}.muted{color:#b69bcf}
-    @media (max-width:560px){dl{grid-template-columns:1fr}main{padding:14px}}
+    @media (max-width:560px){dl,.gif-row{grid-template-columns:1fr}main{padding:14px}}
   </style>
 </head>
 <body>
@@ -149,6 +171,12 @@ const char PAGE_HTML[] PROGMEM = R"rawliteral(
     <section class="library">
       <h2>Animations disponibles</h2>
       <div id="gifs" class="muted">Chargement...</div>
+      <form id="upload-form" enctype="multipart/form-data">
+        <label for="gif-file">Ajouter un GIF sur la microSD</label>
+        <input id="gif-file" name="gif" type="file" accept=".gif,image/gif" required>
+        <button type="submit">Televerser</button>
+        <progress id="progress" value="0" max="100"></progress>
+      </form>
       <div id="error" class="error"></div>
     </section>
   </main>
@@ -163,7 +191,10 @@ const char PAGE_HTML[] PROGMEM = R"rawliteral(
       state: document.querySelector('#state'),
       toggle: document.querySelector('#toggle'),
       gifs: document.querySelector('#gifs'),
-      error: document.querySelector('#error')
+      error: document.querySelector('#error'),
+      uploadForm: document.querySelector('#upload-form'),
+      gifFile: document.querySelector('#gif-file'),
+      progress: document.querySelector('#progress')
     };
     function bytes(value){return value ? `${value.toLocaleString('fr-CH')} octets` : '-'}
     function esc(value){return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -195,12 +226,13 @@ const char PAGE_HTML[] PROGMEM = R"rawliteral(
             <div class="gif-name">${esc(g.name)} ${g.current ? '<span class="ok">● actif</span>' : ''}</div>
             <div class="gif-meta">${esc(g.path)} · ${bytes(g.size)}</div>
           </div>
-          <button type="button" data-path="${esc(g.path)}">Lire</button>
+          <button type="button" data-play="${esc(g.path)}">Lire</button>
+          <button class="danger" type="button" data-delete="${esc(g.path)}" ${g.current ? 'disabled' : ''}>Supprimer</button>
         </div>
       `).join('');
-      fields.gifs.querySelectorAll('button[data-path]').forEach(button => {
+      fields.gifs.querySelectorAll('button[data-play]').forEach(button => {
         button.addEventListener('click', async () => {
-          const body = new URLSearchParams({path: button.dataset.path});
+          const body = new URLSearchParams({path: button.dataset.play});
           const res = await fetch('/api/play', {method:'POST', body});
           const status = await res.json();
           fields.error.textContent = status.message || '';
@@ -208,7 +240,46 @@ const char PAGE_HTML[] PROGMEM = R"rawliteral(
           await refreshGifs();
         });
       });
+      fields.gifs.querySelectorAll('button[data-delete]').forEach(button => {
+        button.addEventListener('click', async () => {
+          if (!confirm(`Supprimer ${button.dataset.delete} ?`)) return;
+          const body = new URLSearchParams({path: button.dataset.delete});
+          const res = await fetch('/api/delete', {method:'POST', body});
+          const status = await res.json();
+          fields.error.textContent = status.message || '';
+          await refresh();
+          await refreshGifs();
+        });
+      });
     }
+    fields.uploadForm.addEventListener('submit', event => {
+      event.preventDefault();
+      const file = fields.gifFile.files[0];
+      if (!file) return;
+      const data = new FormData();
+      data.append('gif', file, file.name);
+      const xhr = new XMLHttpRequest();
+      fields.progress.value = 0;
+      fields.error.textContent = 'Televersement en cours...';
+      xhr.upload.onprogress = event => {
+        if (event.lengthComputable) fields.progress.value = Math.round(event.loaded * 100 / event.total);
+      };
+      xhr.onload = async () => {
+        let status = {};
+        try { status = JSON.parse(xhr.responseText || '{}'); } catch(e) {}
+        fields.error.textContent = status.message || (xhr.status < 400 ? 'Televersement termine' : 'Erreur televersement');
+        fields.gifFile.value = '';
+        fields.progress.value = xhr.status < 400 ? 100 : 0;
+        await refresh();
+        await refreshGifs();
+      };
+      xhr.onerror = () => {
+        fields.error.textContent = 'Erreur reseau pendant le televersement';
+        fields.progress.value = 0;
+      };
+      xhr.open('POST', '/api/upload');
+      xhr.send(data);
+    });
     fields.toggle.addEventListener('click', async () => {
       await fetch('/api/toggle', {method:'POST'});
       refresh();
@@ -429,7 +500,7 @@ void envoyerEtatJSON() {
     sizeof(reponse),
     "{\"sd\":%s,\"gifName\":\"%s\",\"gifWidth\":%d,\"gifHeight\":%d,"
     "\"gifSize\":%lu,\"freeHeap\":%lu,\"ip\":\"%s\",\"paused\":%s,"
-    "\"gifActive\":%s,\"message\":\"%s\"}",
+    "\"gifActive\":%s,\"sdBusy\":%s,\"message\":\"%s\"}",
     carteSDDisponible ? "true" : "false",
     gifActuel,
     gifLargeur,
@@ -439,6 +510,7 @@ void envoyerEtatJSON() {
     ipTexte,
     lectureEnPause ? "true" : "false",
     gifActif ? "true" : "false",
+    ecritureSDEnCours ? "true" : "false",
     dernierMessage
   );
 
@@ -471,6 +543,11 @@ void envoyerListeGIFsJSON() {
 }
 
 void jouerGIFDepuisWeb() {
+  if (ecritureSDEnCours) {
+    server.send(409, "application/json", "{\"ok\":false,\"message\":\"Operation SD en cours\"}");
+    return;
+  }
+
   if (!server.hasArg("path")) {
     strncpy(dernierMessage, "Parametre path manquant", sizeof(dernierMessage) - 1);
     dernierMessage[sizeof(dernierMessage) - 1] = '\0';
@@ -501,6 +578,11 @@ void jouerGIFDepuisWeb() {
 }
 
 void basculerLecture() {
+  if (ecritureSDEnCours) {
+    server.send(409, "application/json", "{\"ok\":false,\"message\":\"Operation SD en cours\"}");
+    return;
+  }
+
   lectureEnPause = !lectureEnPause;
 
   if (!lectureEnPause) {
@@ -523,6 +605,8 @@ void demarrerWiFi() {
   server.on("/api/status", HTTP_GET, envoyerEtatJSON);
   server.on("/api/gifs", HTTP_GET, envoyerListeGIFsJSON);
   server.on("/api/play", HTTP_POST, jouerGIFDepuisWeb);
+  server.on("/api/upload", HTTP_POST, terminerUploadGIF, traiterUploadGIF);
+  server.on("/api/delete", HTTP_POST, supprimerGIFDepuisWeb);
   server.on("/api/toggle", HTTP_POST, basculerLecture);
   server.onNotFound(envoyerIntrouvable);
   server.begin();
@@ -579,6 +663,7 @@ bool cheminGIFValide(const char* chemin) {
   if (
     strstr(chemin, "..") != nullptr ||
     strchr(chemin, '\\') != nullptr ||
+    strchr(chemin + 6, '/') != nullptr ||
     strchr(chemin, '"') != nullptr
   ) {
     return false;
@@ -591,6 +676,36 @@ bool cheminGIFValide(const char* chemin) {
   }
 
   return extensionGIF(chemin);
+}
+
+bool nomFichierGIFValide(const char* nom) {
+  if (nom == nullptr) {
+    return false;
+  }
+
+  size_t longueur = strlen(nom);
+
+  if (longueur < 5 || longueur >= GIF_NAME_MAX_LENGTH) {
+    return false;
+  }
+
+  if (
+    strstr(nom, "..") != nullptr ||
+    strchr(nom, '/') != nullptr ||
+    strchr(nom, '\\') != nullptr ||
+    strchr(nom, '"') != nullptr ||
+    nom[0] == '.'
+  ) {
+    return false;
+  }
+
+  for (size_t i = 0; i < longueur; i++) {
+    if (static_cast<uint8_t>(nom[i]) < 32) {
+      return false;
+    }
+  }
+
+  return extensionGIF(nom);
 }
 
 int trouverGIFParChemin(const char* chemin) {
@@ -683,6 +798,301 @@ void fermerAnimationGIF() {
   }
 
   gifActif = false;
+}
+
+void definirMessage(const char* message) {
+  strncpy(dernierMessage, message, sizeof(dernierMessage) - 1);
+  dernierMessage[sizeof(dernierMessage) - 1] = '\0';
+  Serial.println(dernierMessage);
+}
+
+void suspendreAnimationPourSD() {
+  lectureEtaitEnPauseAvantUpload = lectureEnPause;
+  strncpy(gifAvantEcriture, gifActuel, sizeof(gifAvantEcriture) - 1);
+  gifAvantEcriture[sizeof(gifAvantEcriture) - 1] = '\0';
+  lectureEnPause = true;
+  ecritureSDEnCours = true;
+  fermerAnimationGIF();
+}
+
+void reprendreAnimationApresSD() {
+  char messageAvantReprise[sizeof(dernierMessage)];
+
+  strncpy(messageAvantReprise, dernierMessage, sizeof(messageAvantReprise) - 1);
+  messageAvantReprise[sizeof(messageAvantReprise) - 1] = '\0';
+
+  ecritureSDEnCours = false;
+  lectureEnPause = lectureEtaitEnPauseAvantUpload;
+
+  if (!lectureEnPause && carteSDDisponible) {
+    if (!lancerGIF(gifAvantEcriture)) {
+      lancerGIF(dernierGIFValide);
+    }
+  }
+
+  if (messageAvantReprise[0] != '\0') {
+    strncpy(dernierMessage, messageAvantReprise, sizeof(dernierMessage) - 1);
+    dernierMessage[sizeof(dernierMessage) - 1] = '\0';
+  }
+}
+
+bool signatureUploadGIFValide() {
+  return (
+    uploadSignatureOctets == 6 &&
+    memcmp(uploadSignature, "GIF87a", 6) == 0
+  ) || (
+    uploadSignatureOctets == 6 &&
+    memcmp(uploadSignature, "GIF89a", 6) == 0
+  );
+}
+
+void abandonnerUpload(const char* message) {
+  uploadErreur = true;
+  uploadOK = false;
+  strncpy(uploadMessage, message, sizeof(uploadMessage) - 1);
+  uploadMessage[sizeof(uploadMessage) - 1] = '\0';
+  definirMessage(uploadMessage);
+
+  if (uploadFile) {
+    uploadFile.close();
+  }
+
+  if (carteSDDisponible && SD.exists(UPLOAD_TEMP_PATH)) {
+    SD.remove(UPLOAD_TEMP_PATH);
+  }
+}
+
+void traiterUploadGIF() {
+  HTTPUpload& upload = server.upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    uploadErreur = false;
+    uploadOK = false;
+    uploadSignatureOctets = 0;
+    uploadCheminFinal[0] = '\0';
+    uploadNomFinal[0] = '\0';
+    uploadMessage[0] = '\0';
+
+    if (!carteSDDisponible) {
+      abandonnerUpload("SD inaccessible");
+      return;
+    }
+
+    const char* nomBrut = upload.filename.c_str();
+    const char* nomBase = strrchr(nomBrut, '/');
+    nomBase = nomBase == nullptr ? nomBrut : nomBase + 1;
+    const char* nomWindows = strrchr(nomBase, '\\');
+    nomBase = nomWindows == nullptr ? nomBase : nomWindows + 1;
+
+    if (!nomFichierGIFValide(nomBase)) {
+      abandonnerUpload("Nom de fichier GIF invalide");
+      return;
+    }
+
+    snprintf(uploadCheminFinal, sizeof(uploadCheminFinal), "%s/%s", GIF_DIRECTORY, nomBase);
+
+    if (!cheminGIFValide(uploadCheminFinal)) {
+      abandonnerUpload("Chemin final refuse");
+      return;
+    }
+
+    if (!SD.exists(GIF_DIRECTORY) && !SD.mkdir(GIF_DIRECTORY)) {
+      abandonnerUpload("Dossier /gifs inaccessible");
+      return;
+    }
+
+    if (SD.exists(uploadCheminFinal)) {
+      abandonnerUpload("Un GIF porte deja ce nom");
+      return;
+    }
+
+    suspendreAnimationPourSD();
+
+    if (SD.exists(UPLOAD_TEMP_PATH)) {
+      SD.remove(UPLOAD_TEMP_PATH);
+    }
+
+    uploadFile = SD.open(UPLOAD_TEMP_PATH, FILE_WRITE);
+
+    if (!uploadFile) {
+      abandonnerUpload("Manque d'espace ou fichier temporaire impossible");
+      reprendreAnimationApresSD();
+      return;
+    }
+
+    strncpy(uploadNomFinal, nomBase, sizeof(uploadNomFinal) - 1);
+    uploadNomFinal[sizeof(uploadNomFinal) - 1] = '\0';
+    definirMessage("Televersement GIF en cours");
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_WRITE) {
+    if (uploadErreur) {
+      return;
+    }
+
+    if (!ecritureSDEnCours || !uploadFile) {
+      abandonnerUpload("Ecriture SD non initialisee");
+      reprendreAnimationApresSD();
+      return;
+    }
+
+    if (upload.totalSize > MAX_UPLOAD_SIZE_BYTES) {
+      abandonnerUpload("Fichier trop grand");
+      reprendreAnimationApresSD();
+      return;
+    }
+
+    for (
+      size_t i = 0;
+      i < upload.currentSize && uploadSignatureOctets < sizeof(uploadSignature);
+      i++
+    ) {
+      uploadSignature[uploadSignatureOctets++] = upload.buf[i];
+    }
+
+    size_t ecrit = uploadFile.write(upload.buf, upload.currentSize);
+
+    if (ecrit != upload.currentSize) {
+      abandonnerUpload("Manque d'espace pendant l'ecriture");
+      reprendreAnimationApresSD();
+    }
+
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_END) {
+    if (uploadErreur) {
+      if (ecritureSDEnCours) {
+        reprendreAnimationApresSD();
+      }
+      return;
+    }
+
+    if (uploadFile) {
+      uploadFile.close();
+    }
+
+    if (upload.totalSize == 0) {
+      abandonnerUpload("Fichier vide");
+      reprendreAnimationApresSD();
+      return;
+    }
+
+    if (upload.totalSize > MAX_UPLOAD_SIZE_BYTES) {
+      abandonnerUpload("Fichier trop grand");
+      reprendreAnimationApresSD();
+      return;
+    }
+
+    if (!signatureUploadGIFValide()) {
+      abandonnerUpload("Signature GIF non compatible");
+      reprendreAnimationApresSD();
+      return;
+    }
+
+    if (!SD.rename(UPLOAD_TEMP_PATH, uploadCheminFinal)) {
+      abandonnerUpload("Renommage final impossible");
+      reprendreAnimationApresSD();
+      return;
+    }
+
+    scannerCatalogueGIFs();
+    uploadOK = true;
+    snprintf(
+      uploadMessage,
+      sizeof(uploadMessage),
+      "GIF ajoute : %s",
+      uploadNomFinal
+    );
+    definirMessage(uploadMessage);
+    reprendreAnimationApresSD();
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_ABORTED) {
+    abandonnerUpload("Televersement interrompu");
+    if (ecritureSDEnCours) {
+      reprendreAnimationApresSD();
+    }
+  }
+}
+
+void terminerUploadGIF() {
+  if (uploadOK) {
+    char reponse[180];
+    snprintf(
+      reponse,
+      sizeof(reponse),
+      "{\"ok\":true,\"message\":\"%s\"}",
+      uploadMessage
+    );
+    server.send(200, "application/json", reponse);
+    return;
+  }
+
+  char reponse[180];
+  snprintf(
+    reponse,
+    sizeof(reponse),
+    "{\"ok\":false,\"message\":\"%s\"}",
+    uploadMessage[0] == '\0' ? "Televersement echoue" : uploadMessage
+  );
+  server.send(400, "application/json", reponse);
+}
+
+void supprimerGIFDepuisWeb() {
+  if (ecritureSDEnCours) {
+    server.send(409, "application/json", "{\"ok\":false,\"message\":\"Operation SD en cours\"}");
+    return;
+  }
+
+  if (!carteSDDisponible) {
+    definirMessage("SD inaccessible");
+    server.send(503, "application/json", "{\"ok\":false,\"message\":\"SD inaccessible\"}");
+    return;
+  }
+
+  if (!server.hasArg("path")) {
+    definirMessage("Parametre path manquant");
+    server.send(400, "application/json", "{\"ok\":false,\"message\":\"Parametre path manquant\"}");
+    return;
+  }
+
+  String cheminDemande = server.arg("path");
+
+  if (
+    !cheminGIFValide(cheminDemande.c_str()) ||
+    trouverGIFParChemin(cheminDemande.c_str()) < 0
+  ) {
+    definirMessage("Chemin GIF refuse");
+    server.send(400, "application/json", "{\"ok\":false,\"message\":\"Chemin GIF refuse\"}");
+    return;
+  }
+
+  if (
+    strcmp(cheminDemande.c_str(), gifActuel) == 0 ||
+    strcmp(cheminDemande.c_str(), FALLBACK_GIF_PATH) == 0
+  ) {
+    definirMessage("Suppression du GIF actif ou de secours interdite");
+    server.send(409, "application/json", "{\"ok\":false,\"message\":\"Suppression du GIF actif ou de secours interdite\"}");
+    return;
+  }
+
+  suspendreAnimationPourSD();
+
+  bool supprime = SD.remove(cheminDemande.c_str());
+  scannerCatalogueGIFs();
+
+  if (supprime) {
+    definirMessage("GIF supprime");
+    reprendreAnimationApresSD();
+    server.send(200, "application/json", "{\"ok\":true,\"message\":\"GIF supprime\"}");
+  } else {
+    definirMessage("Suppression impossible");
+    reprendreAnimationApresSD();
+    server.send(500, "application/json", "{\"ok\":false,\"message\":\"Suppression impossible\"}");
+  }
 }
 
 // ============================================================
@@ -897,6 +1307,11 @@ void setup() {
 
 void loop() {
   server.handleClient();
+
+  if (ecritureSDEnCours) {
+    delay(1);
+    return;
+  }
 
   if (lectureEnPause) {
     delay(1);
