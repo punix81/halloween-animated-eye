@@ -34,6 +34,7 @@ const uint32_t TFT_FREQUENCY = 40000000;  // 40 MHz
 const uint32_t SD_FREQUENCY  = 10000000;  // 10 MHz
 
 const char* GIF_PATH = "/eye.gif";
+const uint16_t GIF_RESTART_DELAY_MS = 10;
 
 // ============================================================
 // Decodeur GIF
@@ -338,7 +339,7 @@ void setup() {
 }
 
 // ============================================================
-// Lecture en boucle
+// Lecture en boucle infinie
 // ============================================================
 
 void loop() {
@@ -352,7 +353,7 @@ void loop() {
     gif.close();
     gifActif = false;
 
-    delay(10);
+    delay(GIF_RESTART_DELAY_MS);
 
     if (!lancerGIF()) {
       afficherErreur("ERREUR", "Redemarrage GIF impossible");

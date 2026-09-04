@@ -11,7 +11,7 @@ Le sketch :
 - initialise une carte microSD sur le même bus SPI ;
 - lit le fichier `/eye.gif` depuis la carte SD ;
 - décode le GIF avec la bibliothèque `AnimatedGIF` ;
-- affiche l’animation en boucle sur l’écran.
+- affiche l’animation en boucle infinie sur l’écran.
 
 ## Matériel nécessaire
 
@@ -111,9 +111,12 @@ const uint32_t TFT_FREQUENCY = 40000000;
 const uint32_t SD_FREQUENCY  = 10000000;
 
 const char* GIF_PATH = "/eye.gif";
+const uint16_t GIF_RESTART_DELAY_MS = 10;
 ```
 
 Si vous utilisez d’autres broches, modifiez ces valeurs avant le téléversement.
+
+`GIF_RESTART_DELAY_MS` contrôle la petite pause entre la dernière image du GIF et son redémarrage. La valeur `10` garde une boucle quasiment continue.
 
 ## Architecture du dépôt
 
@@ -171,7 +174,7 @@ Important : le GIF sauvegardé dans `assets/gifs/` sert d’archive pour GitHub.
 
 - L’écran est initialisé à `40 MHz`.
 - La carte SD est initialisée à `10 MHz`.
-- Le GIF est relancé automatiquement quand la dernière frame est atteinte.
+- Le GIF est relancé automatiquement quand la dernière image est atteinte.
 - Le rendu utilise `drawRGBBitmap()` ligne par ligne pour limiter la mémoire utilisée.
 
 ## Licence
