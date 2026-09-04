@@ -1,105 +1,107 @@
-# Œil démoniaque Halloween — ESP32-S2 + écran rond GC9A01 + GIF sur microSD
+﻿# Oeil demoniaque Halloween - ESP32-S2 + GC9A01 + GIF microSD
 
-Projet Arduino pour afficher une animation d’œil démoniaque sur un écran rond GC9A01 de 240 × 240 pixels.  
-L’animation est lue depuis une carte microSD sous forme de fichier GIF (`eye.gif`).
+Projet Arduino pour afficher une animation d'oeil demoniaque sur un ecran rond GC9A01 240 x 240 px. Les GIFs sont lus depuis une carte microSD, sans etre charges entierement en RAM.
 
-## Aperçu
+## Apercu
 
 Le sketch :
 
-- initialise un écran TFT rond GC9A01 en SPI matériel ;
-- initialise une carte microSD sur le même bus SPI ;
-- démarre un point d’accès Wi-Fi local `DemonEye` ;
+- initialise un ecran TFT rond GC9A01 en SPI materiel ;
+- initialise une carte microSD sur le meme bus SPI ;
+- demarre un point d'acces Wi-Fi local `DemonEye` ;
 - sert une interface web sombre sur `http://192.168.4.1/` ;
-- expose l’état du montage en JSON sur `/api/status` ;
-- lit le fichier `/eye.gif` depuis la carte SD ;
-- décode le GIF avec la bibliothèque `AnimatedGIF` ;
-- affiche l’animation en boucle infinie sur l’écran.
+- expose l'etat du montage en JSON sur `/api/status` ;
+- expose la liste des GIFs detectes sur `/api/gifs` ;
+- lit `/eye.gif` comme animation de secours ;
+- scanne `/gifs` pour proposer plusieurs animations ;
+- decode le GIF avec la bibliotheque `AnimatedGIF` ;
+- affiche l'animation en boucle infinie sur l'ecran.
 
-## Matériel nécessaire
+## Materiel necessaire
 
 - 1 carte compatible ESP32-S2
-- 1 écran rond TFT GC9A01 240 × 240 pixels
+- 1 ecran rond TFT GC9A01 240 x 240 pixels
 - 1 module lecteur de carte microSD SPI
-- 1 carte microSD formatée en FAT32
+- 1 carte microSD formatee en FAT32
 - Fils Dupont
-- Alimentation USB ou alimentation 5 V adaptée à la carte ESP32-S2
+- Alimentation USB ou alimentation 5 V adaptee a la carte ESP32-S2
 
 ## Connexions
 
-Le code utilise un bus SPI matériel partagé entre l’écran et la carte SD.
+Le code utilise un bus SPI materiel partage entre l'ecran et la carte SD.
 
-| Signal | Broche ESP32-S2 | Périphérique |
+| Signal | Broche ESP32-S2 | Peripherique |
 |---|---:|---|
 | MOSI | GPIO 11 | TFT + microSD |
 | SCLK | GPIO 12 | TFT + microSD |
 | MISO | GPIO 13 | microSD |
-| TFT DC | GPIO 9 | écran GC9A01 |
-| TFT RST | GPIO 8 | écran GC9A01 |
-| TFT CS | GPIO 10 | écran GC9A01 |
+| TFT DC | GPIO 9 | ecran GC9A01 |
+| TFT RST | GPIO 8 | ecran GC9A01 |
+| TFT CS | GPIO 10 | ecran GC9A01 |
 | SD CS | GPIO 34 | module microSD |
 
-Notes importantes :
+Contraintes preservees :
 
-- L’écran et la carte SD partagent `MOSI`, `SCLK` et, si présent côté écran, `MISO`.
-- Chaque périphérique doit avoir son propre `CS`.
-- Vérifier la logique de tension de vos modules. La plupart des modules ESP32-S2 utilisent du 3,3 V.
-- Si votre module microSD ne fonctionne pas sur GPIO 34, choisissez une autre broche libre et modifiez `SD_CS` dans `halloween_Globe_eye.ino`.
+- GC9A01 : `40 MHz`
+- microSD : `10 MHz`
+- bus SPI materiel partage : `MOSI 11`, `SCLK 12`, `MISO 13`
+- fichier de secours : `/eye.gif`
 
-## Bibliothèques Arduino
+## Bibliotheques Arduino
 
-Installer ces bibliothèques depuis le gestionnaire de bibliothèques Arduino :
+Installer depuis le gestionnaire de bibliotheques Arduino :
 
 - `Adafruit GFX Library`
 - `Adafruit GC9A01A`
 - `AnimatedGIF` par Larry Bank
 
-Les bibliothèques suivantes sont généralement incluses avec le support ESP32 Arduino :
+Fournies par le support Arduino ESP32 :
 
 - `SPI`
 - `SD`
 - `WiFi`
 - `WebServer`
 
-## Préparation de la carte microSD
+## Preparation de la carte microSD
 
 1. Formater la carte microSD en `FAT32`.
-2. Copier le fichier GIF à la racine de la carte.
-3. Renommer le fichier exactement :
+2. Garder un GIF de secours a la racine : `/eye.gif`.
+3. Creer un dossier `/gifs`.
+4. Copier les animations selectionnables dans `/gifs`.
 
-```text
-eye.gif
-```
-
-Le chemin attendu par le programme est :
+Structure attendue :
 
 ```text
 /eye.gif
+/gifs/eye-red.gif
+/gifs/eye-green.gif
+/gifs/monster.gif
+/gifs/hypnotic.gif
 ```
 
-Recommandations pour le GIF :
+Regles :
 
-- taille idéale : `240 × 240 px` ;
-- format : GIF animé ;
-- éviter les fichiers trop lourds pour garder une lecture fluide ;
-- si le GIF dépasse `240 × 240 px`, il sera coupé par le sketch.
+- `/eye.gif` reste l'animation de secours.
+- Les GIFs selectionnables depuis le web sont ceux presents dans `/gifs`.
+- Les extensions `.gif`, `.GIF` et variantes majuscules/minuscules sont acceptees.
+- Les chemins contenant `..`, `\`, guillemet ou caracteres de controle sont rejetes.
 
 ## Installation avec Arduino IDE
 
 1. Installer Arduino IDE.
 2. Installer le support ESP32 dans le gestionnaire de cartes.
 3. Ouvrir `halloween_Globe_eye.ino`.
-4. Sélectionner la carte ESP32-S2 utilisée.
-5. Installer les bibliothèques listées plus haut.
-6. Brancher l’ESP32-S2 en USB.
-7. Sélectionner le bon port série.
-8. Téléverser le sketch.
-9. Insérer la carte microSD contenant `eye.gif`.
-10. Ouvrir le moniteur série à `115200 bauds` pour vérifier le démarrage.
+4. Selectionner la carte ESP32-S2 utilisee.
+5. Installer les bibliotheques listees plus haut.
+6. Brancher l'ESP32-S2 en USB.
+7. Selectionner le bon port serie.
+8. Televerser le sketch.
+9. Inserer la carte microSD preparee.
+10. Ouvrir le moniteur serie a `115200 bauds`.
 
 ## Configuration principale
 
-Les paramètres importants sont au début du fichier `halloween_Globe_eye.ino`.
+Les parametres importants sont au debut de `halloween_Globe_eye.ino`.
 
 ```cpp
 #define SPI_MOSI 11
@@ -115,42 +117,42 @@ Les paramètres importants sont au début du fichier `halloween_Globe_eye.ino`.
 const uint32_t TFT_FREQUENCY = 40000000;
 const uint32_t SD_FREQUENCY  = 10000000;
 
-const char* GIF_PATH = "/eye.gif";
-const uint16_t GIF_RESTART_DELAY_MS = 10;
+const char* FALLBACK_GIF_PATH = "/eye.gif";
+const char* GIF_DIRECTORY = "/gifs";
 
 const char WIFI_AP_SSID[] = "DemonEye";
 const char WIFI_AP_PASSWORD[] = "DemonEye2026";
 ```
 
-Si vous utilisez d’autres broches, modifiez ces valeurs avant le téléversement.
-
-`GIF_RESTART_DELAY_MS` contrôle la petite pause entre la dernière image du GIF et son redémarrage. La valeur `10` garde une boucle quasiment continue.
-
-Le mot de passe du point d’accès Wi-Fi doit contenir au moins 8 caractères. Ne mettez pas d’identifiants Wi-Fi personnels dans le dépôt.
+Le mot de passe du point d'acces Wi-Fi doit contenir au moins 8 caracteres. Ne mettez pas d'identifiants Wi-Fi personnels dans le depot.
 
 ## Interface web Wi-Fi
 
-Au démarrage, l’ESP32-S2 crée un point d’accès local :
+Au demarrage, l'ESP32-S2 cree un point d'acces local :
 
 - SSID : `DemonEye`
-- mot de passe par défaut : `DemonEye2026`
+- mot de passe par defaut : `DemonEye2026`
 - adresse IP habituelle : `192.168.4.1`
 
-L’écran affiche brièvement l’adresse IP au démarrage, puis reprend l’animation GIF.
+L'ecran affiche brievement l'adresse IP au demarrage, puis reprend l'animation GIF.
 
-Depuis un téléphone ou un ordinateur :
+Depuis un telephone ou un ordinateur :
 
-1. Se connecter au réseau Wi-Fi `DemonEye`.
+1. Se connecter au reseau Wi-Fi `DemonEye`.
 2. Ouvrir `http://192.168.4.1/` dans un navigateur.
-3. Vérifier les informations affichées : carte SD, GIF actif, dimensions, taille du fichier, mémoire libre, IP et état lecture/pause.
+3. Verifier l'etat SD, le GIF actif, les dimensions, la taille, la memoire libre, l'IP et lecture/pause.
+4. Cliquer sur `Lire` a cote d'un GIF pour changer d'animation.
 
-Route JSON disponible :
+## API locale
 
 ```text
-GET http://192.168.4.1/api/status
+GET  /api/status
+GET  /api/gifs
+POST /api/play
+POST /api/toggle
 ```
 
-Exemple de réponse :
+`GET /api/status` retourne l'etat courant :
 
 ```json
 {
@@ -162,20 +164,35 @@ Exemple de réponse :
   "freeHeap": 123456,
   "ip": "192.168.4.1",
   "paused": false,
-  "gifActive": true
+  "gifActive": true,
+  "message": "Lecture GIF active"
 }
 ```
 
-La page web utilise aussi `POST /api/toggle` pour basculer entre lecture et pause.
+`GET /api/gifs` retourne les animations detectees dans `/gifs` :
+
+```json
+[
+  {
+    "name": "eye-red.gif",
+    "path": "/gifs/eye-red.gif",
+    "size": 123456,
+    "current": false
+  }
+]
+```
+
+`POST /api/play` attend un parametre `path`, par exemple `/gifs/monster.gif`. Le chemin doit correspondre a un GIF detecte au demarrage.
+
+Si le nouveau GIF est invalide, le sketch ferme proprement l'animation courante, tente le nouveau fichier, puis revient automatiquement au dernier GIF valide ou a `/eye.gif`.
 
 ## Lecture GIF et serveur web
 
-Le sketch n’utilise plus `gif.playFrame(true, ...)`, car cette forme peut bloquer avec un `delay()` interne.  
-La lecture utilise `gif.playFrame(false, &delaiFrameMs)` et planifie la prochaine image avec `millis()`.
+Le sketch n'utilise pas `gif.playFrame(true, ...)`, car cette forme peut bloquer avec un `delay()` interne. La lecture utilise `gif.playFrame(false, &delaiFrameMs)` et planifie la prochaine image avec `millis()`.
 
-Cela permet d’appeler régulièrement `server.handleClient()` tout en conservant l’animation.
+Cela permet d'appeler regulierement `server.handleClient()` tout en conservant l'animation.
 
-## Architecture du dépôt
+## Architecture du depot
 
 ```text
 halloween_Globe_eye/
@@ -190,70 +207,57 @@ halloween_Globe_eye/
 └── README.md
 ```
 
-Rôle des dossiers :
+`assets/gifs/` sert a sauvegarder les GIFs dans GitHub. Pour le montage, copiez les fichiers necessaires sur la carte microSD dans la structure decrite plus haut.
 
-- `halloween_Globe_eye.ino` : sketch Arduino principal. Il reste à la racine car Arduino IDE attend souvent le fichier `.ino` dans le dossier du projet.
-- `assets/gifs/` : sauvegarde des GIFs utilisés par le projet.
-- `docs/` : photos de montage, schémas de câblage, notes de boîtier ou documentation complémentaire.
-- `.gitignore` : exclut les fichiers locaux inutiles comme la configuration IDE.
+## Depannage
 
-Important : le GIF sauvegardé dans `assets/gifs/` sert d’archive pour GitHub. Pour faire fonctionner le montage, copiez le GIF voulu à la racine de la carte microSD et renommez-le exactement `eye.gif`.
+### Carte SD inaccessible
 
-## Dépannage
-
-### Message : `Carte SD inaccessible`
-
-- Vérifier le câblage `MOSI`, `MISO`, `SCLK` et `SD_CS`.
-- Vérifier que la carte est formatée en FAT32.
+- Verifier `MOSI`, `MISO`, `SCLK` et `SD_CS`.
+- Verifier que la carte est formatee en FAT32.
 - Tester une autre carte microSD.
-- Réduire `SD_FREQUENCY` à `4000000` si le module SD est instable.
+- Reduire `SD_FREQUENCY` a `4000000` si le module SD est instable.
 
-### Message : `eye.gif introuvable`
+### Aucun GIF dans la page web
 
-- Vérifier que le fichier est à la racine de la carte microSD.
-- Vérifier que le nom est exactement `eye.gif`.
-- Éviter `eye.gif.gif`, fréquent sous Windows si les extensions sont masquées.
+- Verifier que le dossier `/gifs` existe a la racine de la microSD.
+- Verifier que les fichiers finissent par `.gif`.
+- Redemarrer l'ESP32-S2 apres ajout de fichiers, car le scan est fait au demarrage.
 
-### Écran noir
+### GIF invalide ou impossible a lire
 
-- Vérifier `TFT_CS`, `TFT_DC`, `TFT_RST`, `MOSI` et `SCLK`.
-- Vérifier que l’écran est bien un modèle GC9A01.
-- Tester une fréquence plus basse pour l’écran, par exemple `27000000`.
-
-### Animation lente ou saccadée
-
-- Utiliser un GIF plus léger.
-- Réduire le nombre d’images ou la taille du fichier.
-- Utiliser une carte microSD plus rapide.
-- Garder le GIF à `240 × 240 px` maximum.
+- Verifier le moniteur serie a `115200 bauds`.
+- Tester un GIF plus petit ou reexporte proprement.
+- Garder `/eye.gif` valide comme secours.
 
 ### Interface web inaccessible
 
-- Vérifier que le téléphone est connecté au Wi-Fi `DemonEye`.
+- Verifier que le telephone est connecte au Wi-Fi `DemonEye`.
 - Ouvrir directement `http://192.168.4.1/`.
-- Vérifier le moniteur série à `115200 bauds`.
-- Garder l’ESP32-S2 alimenté même si aucun téléphone n’est connecté : l’œil continue à fonctionner seul.
+- Garder l'ESP32-S2 alimente meme si aucun telephone n'est connecte : l'oeil continue a fonctionner seul.
 
-## Test manuel recommandé
+## Test manuel recommande
 
-1. Copier `assets/gifs/eye.gif` à la racine de la carte microSD sous le nom `eye.gif`.
-2. Téléverser le sketch sur l’ESP32-S2.
-3. Vérifier sur le GC9A01 que l’adresse IP s’affiche brièvement.
-4. Vérifier que l’animation reprend ensuite en boucle.
-5. Se connecter au Wi-Fi `DemonEye`.
-6. Ouvrir `http://192.168.4.1/`.
-7. Vérifier que `/api/status` retourne un JSON cohérent.
-8. Tester le bouton lecture/pause sans redémarrer l’ESP32-S2.
+1. Copier `assets/gifs/eye.gif` a la racine de la carte microSD sous le nom `eye.gif`.
+2. Creer `/gifs` sur la microSD et y copier `eye-red.gif`, `eye-green.gif`, `monster.gif` et `hypnotic.gif`.
+3. Televerser le sketch sur l'ESP32-S2.
+4. Verifier sur le GC9A01 que l'adresse IP s'affiche brievement.
+5. Verifier que l'animation de secours `/eye.gif` demarre.
+6. Se connecter au Wi-Fi `DemonEye`.
+7. Ouvrir `http://192.168.4.1/`.
+8. Verifier que la liste des GIFs de `/gifs` apparait.
+9. Cliquer sur `Lire` pour plusieurs GIFs et verifier que l'ecran change sans redemarrage.
+10. Verifier que `/api/status` et `/api/gifs` retournent des JSON coherents.
+11. Tester le bouton lecture/pause sans redemarrer l'ESP32-S2.
+12. Tester un GIF invalide dans `/gifs` : la page et le moniteur serie doivent afficher une erreur, puis le dernier GIF valide doit reprendre.
 
 ## Notes techniques
 
-- L’écran est initialisé à `40 MHz`.
-- La carte SD est initialisée à `10 MHz`.
-- Le GIF est relancé automatiquement quand la dernière image est atteinte.
 - Le serveur web utilise uniquement `WiFi.h` et `WebServer.h` du core Arduino ESP32.
-- Le rendu utilise `drawRGBBitmap()` ligne par ligne pour limiter la mémoire utilisée.
+- Les GIFs de `/gifs` sont references par nom, chemin et taille ; ils ne sont pas charges entierement en RAM.
+- Le rendu utilise `drawRGBBitmap()` ligne par ligne pour limiter la memoire utilisee.
+- Le fonctionnement de l'oeil ne depend pas d'un telephone connecte.
 
 ## Licence
 
-Ajoutez la licence de votre choix avant de publier le dépôt.  
-Pour un projet personnel open source simple, une licence `MIT` est souvent suffisante.
+Ajoutez la licence de votre choix avant de publier le depot. Pour un projet personnel open source simple, une licence `MIT` est souvent suffisante.
