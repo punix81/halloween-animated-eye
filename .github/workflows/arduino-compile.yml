@@ -1,0 +1,51 @@
+name: Arduino Compile
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  FQBN: esp32:esp32:lolin_s2_mini
+  ARDUINO_CLI_VERSION: "1.5.0"
+  ESP32_CORE_VERSION: "3.3.11"
+  ADAFRUIT_GFX_VERSION: "1.12.6"
+  ADAFRUIT_GC9A01A_VERSION: "1.1.1"
+  ANIMATEDGIF_VERSION: "2.2.0"
+  ESP32_PACKAGE_URL: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+jobs:
+  compile:
+    name: Compile LOLIN S2 Mini
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+        with:
+          version: ${{ env.ARDUINO_CLI_VERSION }}
+
+      - name: Install ESP32 core
+        run: |
+          arduino-cli core update-index --additional-urls "$ESP32_PACKAGE_URL"
+          arduino-cli core install "esp32:esp32@$ESP32_CORE_VERSION" --additional-urls "$ESP32_PACKAGE_URL"
+
+      - name: Install libraries
+        run: |
+          arduino-cli lib install "Adafruit GFX Library@$ADAFRUIT_GFX_VERSION"
+          arduino-cli lib install "Adafruit GC9A01A@$ADAFRUIT_GC9A01A_VERSION"
+          arduino-cli lib install "AnimatedGIF@$ANIMATEDGIF_VERSION"
+
+      - name: Compile sketch
+        run: >
+          arduino-cli compile
+          --fqbn "$FQBN"
+          --warnings all
+          --export-binaries
+          --build-property "compiler.cpp.extra_flags=-DDEMON_EYE_ALLOW_EXAMPLE_OTA_PASSWORD"
+          .
