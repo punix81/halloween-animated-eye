@@ -1,5 +1,7 @@
 ﻿# Oeil demoniaque Halloween - ESP32-S2 + GC9A01 + GIF microSD
 
+[![Arduino Compile](https://github.com/punix81/halloween-animated-eye/actions/workflows/arduino-compile.yml/badge.svg)](https://github.com/punix81/halloween-animated-eye/actions/workflows/arduino-compile.yml)
+
 Projet Arduino pour afficher une animation d'oeil demoniaque sur un ecran rond GC9A01 240 x 240 px. Les GIFs sont lus depuis une carte microSD, sans etre charges entierement en RAM.
 
 ## Apercu
@@ -15,6 +17,7 @@ Le sketch :
 - permet de selectionner, televerser et supprimer des GIFs dans `/gifs` ;
 - ajoute des commandes persistantes : lecture/pause, redemarrage, vitesse, aleatoire, precedent/suivant et repetition ;
 - restaure au demarrage le dernier GIF valide et les parametres avec `Preferences` ;
+- propose une page OTA protegee pour mettre a jour le firmware par Wi-Fi ;
 - conserve `/eye.gif` comme animation de secours.
 
 ## Materiel necessaire
@@ -62,6 +65,18 @@ Fournies par le support Arduino ESP32 :
 - `WiFi`
 - `WebServer`
 - `Preferences`
+- `Update`
+
+Versions utilisees par la verification GitHub Actions :
+
+| Composant | Version |
+|---|---:|
+| Arduino CLI | `1.5.0` |
+| Coeur Arduino ESP32 | `3.3.11` |
+| FQBN cible | `esp32:esp32:lolin_s2_mini` |
+| Adafruit GFX Library | `1.12.6` |
+| Adafruit GC9A01A | `1.1.1` |
+| AnimatedGIF | `2.2.0` |
 
 ## Carte microSD
 
@@ -88,12 +103,14 @@ Regles :
 1. Installer Arduino IDE.
 2. Installer le support ESP32 dans le gestionnaire de cartes.
 3. Ouvrir `halloween_Globe_eye.ino`.
-4. Selectionner la carte ESP32-S2 utilisee.
-5. Installer les bibliotheques listees plus haut.
-6. Preparer la microSD avec `/eye.gif` et le dossier `/gifs`.
-7. Brancher l'ESP32-S2 en USB.
-8. Televerser le sketch.
-9. Ouvrir le moniteur serie a `115200 bauds`.
+4. Copier `config.example.h` vers `config.h`.
+5. Changer `OTA_AUTH_PASSWORD` dans `config.h`.
+6. Selectionner la carte ESP32-S2 utilisee.
+7. Installer les bibliotheques listees plus haut.
+8. Preparer la microSD avec `/eye.gif` et le dossier `/gifs`.
+9. Brancher l'ESP32-S2 en USB.
+10. Televerser le sketch.
+11. Ouvrir le moniteur serie a `115200 bauds`.
 
 ## Configuration principale
 
@@ -121,6 +138,32 @@ const char WIFI_AP_PASSWORD[] = "DemonEye2026";
 ```
 
 Le mot de passe du point d'acces Wi-Fi doit contenir au moins 8 caracteres. Ne mettez pas d'identifiants Wi-Fi personnels dans le depot.
+
+## Mise a jour OTA
+
+La page `http://192.168.4.1/ota` permet de televerser un nouveau firmware `.bin` sans rebrancher l'ESP32-S2 en USB.
+
+Protection :
+
+- identifiant par defaut : `admin` ;
+- mot de passe lu depuis `config.h` via `OTA_AUTH_PASSWORD` ;
+- compilation refusee si le mot de passe d'exemple n'a pas ete remplace ;
+- `config.h` est ignore par Git pour eviter de publier le secret.
+
+Pour creer le firmware OTA depuis Arduino IDE, utiliser `Croquis > Exporter les binaires compiles`, puis envoyer le fichier `.bin` correspondant a la carte ESP32-S2 depuis la page OTA.
+
+Procedure complete :
+
+1. Compiler une premiere fois par USB avec un `config.h` local.
+2. Verifier que l'interface repond sur `http://192.168.4.1/`.
+3. Dans Arduino IDE, lancer `Croquis > Exporter les binaires compiles`.
+4. Recuperer le fichier `.bin` genere pour la carte `LOLIN S2 Mini`.
+5. Ouvrir `http://192.168.4.1/ota`.
+6. S'authentifier avec `OTA_AUTH_USERNAME` et `OTA_AUTH_PASSWORD`.
+7. Envoyer le fichier `.bin`.
+8. Attendre le message de succes; l'ESP32-S2 redemarre uniquement si `Update.end()` et `Update.isFinished()` confirment la mise a jour.
+
+Si la mise a jour echoue, le sketch renvoie une erreur JSON, reprend l'animation si possible et conserve l'acces local a `192.168.4.1`.
 
 ## Interface web Wi-Fi
 
@@ -150,6 +193,8 @@ POST /api/play
 POST /api/upload
 POST /api/delete
 POST /api/toggle
+GET  /ota
+POST /ota/update
 ```
 
 Routes de controle de lecture :
@@ -177,6 +222,7 @@ POST /api/playback
   "random": false,
   "repeat": true,
   "mode": "normal",
+  "firmwareVersion": "0.4.0",
   "message": "Lecture GIF active"
 }
 ```
@@ -228,6 +274,8 @@ La comparaison temporelle utilise une difference signee afin de rester correcte 
 - `Manque d'espace pendant l'ecriture` : un chunk n'a pas ete ecrit completement.
 - `Un GIF porte deja ce nom` : l'upload refuse d'ecraser un fichier existant.
 - `Suppression du GIF actif ou de secours interdite` : securite contre une suppression dangereuse.
+- `Firmware refuse : extension .bin requise` : la page OTA refuse les fichiers non `.bin`.
+- `Update.begin echoue`, `Update.write incomplet`, `Update.end echoue` : erreur retournee par la bibliotheque `Update`.
 
 En cas d'echec d'upload, `/gifs/.upload.tmp` est supprime et l'animation precedente reprend si elle est encore lisible.
 
@@ -251,6 +299,7 @@ En cas d'echec d'upload, `/gifs/.upload.tmp` est supprime et l'animation precede
 16. Supprimer un GIF non actif et verifier qu'il disparait.
 17. Verifier que la suppression du GIF actif est refusee.
 18. Tester un GIF invalide ou trop grand : erreur lisible puis reprise du dernier GIF valide.
+19. Ouvrir `http://192.168.4.1/ota`, saisir les identifiants OTA, puis tester le refus d'un fichier non `.bin`.
 
 ## Architecture du depot
 
@@ -263,10 +312,11 @@ halloween_Globe_eye/
 ├── docs/
 │   └── README.md
 ├── .gitignore
+├── config.example.h
 ├── halloween_Globe_eye.ino
 └── README.md
 ```
 
 ## Licence
 
-Ajoutez la licence de votre choix avant de publier le depot. Pour un projet personnel open source simple, une licence `MIT` est souvent suffisante.
+Licence non definie pour le moment. Choisir explicitement une licence avant publication ou distribution du projet.
