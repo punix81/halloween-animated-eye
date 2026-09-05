@@ -3,10 +3,36 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
+#include <Update.h>
+#include <stdlib.h>
 #include <ctype.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_GC9A01A.h>
 #include <AnimatedGIF.h>
+
+#if __has_include("config.h")
+#include "config.h"
+#else
+#define OTA_AUTH_USERNAME "admin"
+#define OTA_AUTH_PASSWORD "replace-with-at-least-8-characters"
+#endif
+
+#ifndef DEMON_EYE_ALLOW_EXAMPLE_OTA_PASSWORD
+  static_assert(
+    !(
+      sizeof(OTA_AUTH_PASSWORD) == sizeof("replace-with-at-least-8-characters") &&
+      OTA_AUTH_PASSWORD[0] == 'r' &&
+      OTA_AUTH_PASSWORD[8] == 'w' &&
+      OTA_AUTH_PASSWORD[18] == 'a' &&
+      OTA_AUTH_PASSWORD[33] == 's'
+    ),
+    "Copiez config.example.h vers config.h et changez OTA_AUTH_PASSWORD avant compilation."
+  );
+#endif
+static_assert(
+  sizeof(OTA_AUTH_PASSWORD) >= 9,
+  "Le mot de passe OTA doit contenir au moins 8 caracteres."
+);
 
 // ============================================================
 // Bus SPI materiel partage
@@ -47,6 +73,7 @@ const uint32_t MAX_UPLOAD_SIZE_BYTES = 10UL * 1024UL * 1024UL;
 const char* UPLOAD_TEMP_PATH = "/gifs/.upload.tmp";
 const uint16_t VITESSES_LECTURE[] = {50, 75, 100, 125, 150, 200};
 const uint8_t NOMBRE_VITESSES = sizeof(VITESSES_LECTURE) / sizeof(VITESSES_LECTURE[0]);
+const char FIRMWARE_VERSION[] = "0.4.0";
 
 // ============================================================
 // Point d'acces Wi-Fi
@@ -75,6 +102,8 @@ bool gifDisponible = false;
 bool ecritureSDEnCours = false;
 bool uploadErreur = false;
 bool uploadOK = false;
+bool otaErreur = false;
+bool otaOK = false;
 bool lectureEtaitEnPauseAvantUpload = false;
 bool modeAleatoire = false;
 bool repetitionActive = true;
@@ -94,6 +123,7 @@ char gifAvantEcriture[GIF_PATH_MAX_LENGTH] = "/eye.gif";
 char uploadCheminFinal[GIF_PATH_MAX_LENGTH] = "";
 char uploadNomFinal[GIF_NAME_MAX_LENGTH] = "";
 char uploadMessage[120] = "";
+char otaMessage[160] = "";
 uint8_t uploadSignature[6];
 
 File uploadFile;
@@ -104,7 +134,7 @@ struct EntreeGIF {
   uint32_t taille;
 };
 
-EntreeGIF catalogueGIFs[MAX_GIFS];
+EntreeGIF* catalogueGIFs = nullptr;
 
 bool cheminGIFValide(const char* chemin);
 bool nomFichierGIFValide(const char* nom);
@@ -122,6 +152,11 @@ void modifierLectureDepuisWeb();
 void traiterUploadGIF();
 void terminerUploadGIF();
 void supprimerGIFDepuisWeb();
+bool authentifierOTA();
+void envoyerPageOTA();
+void traiterUploadOTA();
+void terminerUploadOTA();
+bool initialiserCatalogueGIFs();
 
 // Le GC9A01 fait 240 pixels de large.
 uint16_t lignePixels[240];
@@ -143,78 +178,59 @@ const char PAGE_HTML[] PROGMEM = R"rawliteral(
     main{width:min(94vw,760px);margin:0 auto;padding:16px 0 28px}
     .card,.panel{border:1px solid #442759;border-radius:22px;background:rgba(13,8,20,.9);box-shadow:0 22px 70px rgba(0,0,0,.45);overflow:hidden}
     header{padding:26px 22px;background:linear-gradient(135deg,#f02d55,#6120a8)}
-    h1{margin:0;font-size:clamp(2.2rem,10vw,4.8rem);line-height:.9;letter-spacing:-.06em}
-    h2{margin:0 0 14px;font-size:1.15rem}.panel{margin-top:16px;padding:18px}
-    p{margin:.7rem 0 0;color:#f3d8ff}dl{display:grid;grid-template-columns:1fr 1fr;gap:1px;margin:0;background:#2b1d3a}
-    div.row{display:grid;gap:6px;padding:16px;background:#100b18}dt{font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#bfa5d8}
-    dd{margin:0;font-size:1.08rem;font-weight:800;overflow-wrap:anywhere}button,select{border:1px solid #5a3672;border-radius:14px;padding:12px;background:#21122f;color:#fff;font-weight:800;font-size:1rem}
-    button{background:#ff315f;border:0}button.secondary{background:#5d2bc3}button.danger{background:#652034}button:disabled{opacity:.45}
-    .buttons{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.toggles{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
-    label{display:grid;gap:7px;color:#cdb7e2;font-weight:700}.gif-row{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;padding:12px 0;border-top:1px solid #2b1d3a}
-    .gif-row:first-of-type{border-top:0}.gif-name{font-weight:900}.gif-meta{font-size:.86rem;color:#b69bcf;overflow-wrap:anywhere}
-    form{display:grid;gap:12px;margin-top:8px}input[type=file]{width:100%;color:#f5e9ff}progress{width:100%;height:18px}.error{margin-top:14px;color:#ffb3c1;min-height:1.2rem}
-    .ok{color:#52f29a}.bad{color:#ff6b6b}.muted{color:#b69bcf}.mode{color:#ffd166}
+    h1{margin:0;font-size:clamp(2.2rem,10vw,4.8rem);line-height:.9;letter-spacing:-.06em}h2{margin:0 0 14px;font-size:1.15rem}.panel{margin-top:16px;padding:18px}
+    p{margin:.7rem 0 0;color:#f3d8ff}a{color:#ffd166;font-weight:800}dl{display:grid;grid-template-columns:1fr 1fr;gap:1px;margin:0;background:#2b1d3a}
+    div.row{display:grid;gap:6px;padding:16px;background:#100b18}dt{font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#bfa5d8}dd{margin:0;font-size:1.08rem;font-weight:800;overflow-wrap:anywhere}
+    button,select{border:1px solid #5a3672;border-radius:14px;padding:12px;background:#21122f;color:#fff;font-weight:800;font-size:1rem}button{background:#ff315f;border:0}button.secondary{background:#5d2bc3}button.danger{background:#652034}button:disabled{opacity:.45}
+    .buttons{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.toggles{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}label{display:grid;gap:7px;color:#cdb7e2;font-weight:700}
+    .gif-row{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;padding:12px 0;border-top:1px solid #2b1d3a}.gif-row:first-of-type{border-top:0}.gif-name{font-weight:900}.gif-meta{font-size:.86rem;color:#b69bcf;overflow-wrap:anywhere}
+    form{display:grid;gap:12px;margin-top:8px}input[type=file]{width:100%;color:#f5e9ff}progress{width:100%;height:18px}.error{margin-top:14px;color:#ffb3c1;min-height:1.2rem}.ok{color:#52f29a}.bad{color:#ff6b6b}.muted{color:#b69bcf}.mode{color:#ffd166}
     @media (max-width:620px){dl,.gif-row,.buttons,.toggles{grid-template-columns:1fr}main{padding:10px 0 20px}.panel{padding:14px}}
   </style>
 </head>
-<body>
-  <main>
-    <section class="card">
-      <header><h1>DemonEye</h1><p>Interface Wi-Fi locale de l'oeil Halloween</p></header>
-      <dl>
-        <div class="row"><dt>Carte SD</dt><dd id="sd" class="muted">...</dd></div>
-        <div class="row"><dt>GIF actif</dt><dd id="gif" class="muted">...</dd></div>
-        <div class="row"><dt>Dimensions</dt><dd id="dim" class="muted">...</dd></div>
-        <div class="row"><dt>Taille fichier</dt><dd id="size" class="muted">...</dd></div>
-        <div class="row"><dt>Memoire libre</dt><dd id="heap" class="muted">...</dd></div>
-        <div class="row"><dt>Adresse IP</dt><dd id="ip" class="muted">...</dd></div>
-        <div class="row"><dt>Lecture</dt><dd id="state" class="muted">...</dd></div>
-        <div class="row"><dt>Mode</dt><dd id="mode" class="mode">...</dd></div>
-      </dl>
-    </section>
-    <section class="panel">
-      <h2>Commandes</h2>
-      <div class="buttons">
-        <button type="button" data-action="previous">Precedent</button>
-        <button id="toggle" type="button" data-action="toggle">Lecture / pause</button>
-        <button type="button" data-action="next">Suivant</button>
-        <button type="button" data-action="restart" class="secondary">Redemarrer</button>
-      </div>
-      <div class="toggles">
-        <label>Vitesse<select id="speed"><option value="50">0,5x</option><option value="75">0,75x</option><option value="100">1x</option><option value="125">1,25x</option><option value="150">1,5x</option><option value="200">2x</option></select></label>
-        <label>Aleatoire<select id="random"><option value="0">Desactive</option><option value="1">Active</option></select></label>
-        <label>Repetition<select id="repeat"><option value="1">Activee</option><option value="0">Desactivee</option></select></label>
-      </div>
-    </section>
-    <section class="panel">
-      <h2>Animations disponibles</h2><div id="gifs" class="muted">Chargement...</div>
-    </section>
-    <section class="panel">
-      <h2>Ajouter un GIF</h2>
-      <form id="upload-form" enctype="multipart/form-data">
-        <input id="gif-file" name="gif" type="file" accept=".gif,image/gif" required>
-        <button type="submit">Televerser</button><progress id="progress" value="0" max="100"></progress>
-      </form>
-      <div id="error" class="error"></div>
-    </section>
-  </main>
-  <script>
-    const fields={sd:q('#sd'),gif:q('#gif'),dim:q('#dim'),size:q('#size'),heap:q('#heap'),ip:q('#ip'),state:q('#state'),mode:q('#mode'),toggle:q('#toggle'),speed:q('#speed'),random:q('#random'),repeat:q('#repeat'),gifs:q('#gifs'),error:q('#error'),uploadForm:q('#upload-form'),gifFile:q('#gif-file'),progress:q('#progress')};
-    function q(s){return document.querySelector(s)}
-    function bytes(v){return v?`${Number(v).toLocaleString('fr-CH')} octets`:'-'}
-    function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-    function speedLabel(v){return ({50:'0,5x',75:'0,75x',100:'1x',125:'1,25x',150:'1,5x',200:'2x'}[v]||`${v/100}x`)}
-    async function refresh(){const res=await fetch('/api/status',{cache:'no-store'});const s=await res.json();fields.sd.textContent=s.sd?'Disponible':'Indisponible';fields.sd.className=s.sd?'ok':'bad';fields.gif.textContent=s.gifName;fields.dim.textContent=s.gifWidth&&s.gifHeight?`${s.gifWidth} x ${s.gifHeight}px`:'-';fields.size.textContent=bytes(s.gifSize);fields.heap.textContent=bytes(s.freeHeap);fields.ip.textContent=s.ip;fields.state.textContent=s.paused?'Pause':'Lecture';fields.state.className=s.paused?'bad':'ok';fields.mode.textContent=`${s.random?'Aleatoire':'Normal'} ? repetition ${s.repeat?'on':'off'} ? ${speedLabel(s.speedPercent)}`;fields.speed.value=String(s.speedPercent||100);fields.random.value=s.random?'1':'0';fields.repeat.value=s.repeat?'1':'0';fields.error.textContent=s.message||''}
-    async function refreshGifs(){const res=await fetch('/api/gifs',{cache:'no-store'});const list=await res.json();if(!list.length){fields.gifs.textContent='Aucun GIF trouve dans /gifs.';return}fields.gifs.className='';fields.gifs.innerHTML=list.map(g=>`<div class="gif-row"><div><div class="gif-name">${esc(g.name)} ${g.current?'<span class="ok">actif</span>':''}</div><div class="gif-meta">${esc(g.path)} ? ${bytes(g.size)}</div></div><button type="button" data-play="${esc(g.path)}">Lire</button><button class="danger" type="button" data-delete="${esc(g.path)}" ${g.current?'disabled':''}>Supprimer</button></div>`).join('');fields.gifs.querySelectorAll('button[data-play]').forEach(b=>b.onclick=()=>playGif(b.dataset.play));fields.gifs.querySelectorAll('button[data-delete]').forEach(b=>b.onclick=()=>deleteGif(b.dataset.delete))}
-    async function updatePlayback(params){const res=await fetch('/api/playback',{method:'POST',body:new URLSearchParams(params)});const s=await res.json();fields.error.textContent=s.message||'';await refresh();await refreshGifs()}
-    async function playGif(path){const res=await fetch('/api/play',{method:'POST',body:new URLSearchParams({path})});const s=await res.json();fields.error.textContent=s.message||'';await refresh();await refreshGifs()}
-    async function deleteGif(path){if(!confirm(`Supprimer ${path} ?`))return;const res=await fetch('/api/delete',{method:'POST',body:new URLSearchParams({path})});const s=await res.json();fields.error.textContent=s.message||'';await refresh();await refreshGifs()}
-    fields.toggle.onclick=()=>updatePlayback({action:'toggle'});document.querySelectorAll('button[data-action]').forEach(b=>{if(b.id!=='toggle')b.onclick=()=>updatePlayback({action:b.dataset.action})});fields.speed.onchange=()=>updatePlayback({speed:fields.speed.value});fields.random.onchange=()=>updatePlayback({random:fields.random.value});fields.repeat.onchange=()=>updatePlayback({repeat:fields.repeat.value});
-    fields.uploadForm.onsubmit=e=>{e.preventDefault();const file=fields.gifFile.files[0];if(!file)return;const data=new FormData();data.append('gif',file,file.name);const xhr=new XMLHttpRequest();fields.progress.value=0;fields.error.textContent='Televersement en cours...';xhr.upload.onprogress=e=>{if(e.lengthComputable)fields.progress.value=Math.round(e.loaded*100/e.total)};xhr.onload=async()=>{let s={};try{s=JSON.parse(xhr.responseText||'{}')}catch(e){}fields.error.textContent=s.message||(xhr.status<400?'Televersement termine':'Erreur televersement');fields.gifFile.value='';fields.progress.value=xhr.status<400?100:0;await refresh();await refreshGifs()};xhr.onerror=()=>{fields.error.textContent='Erreur reseau pendant le televersement';fields.progress.value=0};xhr.open('POST','/api/upload');xhr.send(data)};
-    refresh();refreshGifs();setInterval(refresh,2000);setInterval(refreshGifs,5000);
-  </script>
-</body>
-</html>
+<body><main>
+  <section class="card"><header><h1>DemonEye</h1><p>Interface Wi-Fi locale de l'oeil Halloween</p></header><dl>
+    <div class="row"><dt>Carte SD</dt><dd id="sd" class="muted">...</dd></div><div class="row"><dt>GIF actif</dt><dd id="gif" class="muted">...</dd></div><div class="row"><dt>Dimensions</dt><dd id="dim" class="muted">...</dd></div><div class="row"><dt>Taille fichier</dt><dd id="size" class="muted">...</dd></div><div class="row"><dt>Memoire libre</dt><dd id="heap" class="muted">...</dd></div><div class="row"><dt>Adresse IP</dt><dd id="ip" class="muted">...</dd></div><div class="row"><dt>Lecture</dt><dd id="state" class="muted">...</dd></div><div class="row"><dt>Mode</dt><dd id="mode" class="mode">...</dd></div><div class="row"><dt>Firmware</dt><dd id="fw" class="muted">...</dd></div>
+  </dl></section>
+  <section class="panel"><h2>Commandes</h2><div class="buttons"><button type="button" data-action="previous">Precedent</button><button id="toggle" type="button" data-action="toggle">Lecture / pause</button><button type="button" data-action="next">Suivant</button><button type="button" data-action="restart" class="secondary">Redemarrer</button></div><div class="toggles"><label>Vitesse<select id="speed"><option value="50">0,5x</option><option value="75">0,75x</option><option value="100">1x</option><option value="125">1,25x</option><option value="150">1,5x</option><option value="200">2x</option></select></label><label>Aleatoire<select id="random"><option value="0">Desactive</option><option value="1">Active</option></select></label><label>Repetition<select id="repeat"><option value="1">Activee</option><option value="0">Desactivee</option></select></label></div></section>
+  <section class="panel"><h2>Animations disponibles</h2><div id="gifs" class="muted">Chargement...</div></section>
+  <section class="panel"><h2>Ajouter un GIF</h2><form id="upload-form" enctype="multipart/form-data"><input id="gif-file" name="gif" type="file" accept=".gif,image/gif" required><button type="submit">Televerser</button><progress id="progress" value="0" max="100"></progress></form><div id="error" class="error"></div></section>
+  <section class="panel"><h2>Maintenance</h2><p>Firmware OTA protege : <a href="/ota">ouvrir la page de mise a jour</a></p></section>
+</main><script>
+const fields={sd:q('#sd'),gif:q('#gif'),dim:q('#dim'),size:q('#size'),heap:q('#heap'),ip:q('#ip'),state:q('#state'),mode:q('#mode'),fw:q('#fw'),toggle:q('#toggle'),speed:q('#speed'),random:q('#random'),repeat:q('#repeat'),gifs:q('#gifs'),error:q('#error'),uploadForm:q('#upload-form'),gifFile:q('#gif-file'),progress:q('#progress')};
+function q(s){return document.querySelector(s)}function bytes(v){return v?`${Number(v).toLocaleString('fr-CH')} octets`:'-'}function esc(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function speedLabel(v){return({50:'0,5x',75:'0,75x',100:'1x',125:'1,25x',150:'1,5x',200:'2x'}[v]||`${v/100}x`)}
+async function refresh(){const res=await fetch('/api/status',{cache:'no-store'});const s=await res.json();fields.sd.textContent=s.sd?'Disponible':'Indisponible';fields.sd.className=s.sd?'ok':'bad';fields.gif.textContent=s.gifName;fields.dim.textContent=s.gifWidth&&s.gifHeight?`${s.gifWidth} x ${s.gifHeight}px`:'-';fields.size.textContent=bytes(s.gifSize);fields.heap.textContent=bytes(s.freeHeap);fields.ip.textContent=s.ip;fields.state.textContent=s.paused?'Pause':'Lecture';fields.state.className=s.paused?'bad':'ok';fields.mode.textContent=`${s.random?'Aleatoire':'Normal'} ? repetition ${s.repeat?'on':'off'} ? ${speedLabel(s.speedPercent)}`;fields.fw.textContent=s.firmwareVersion||'-';fields.speed.value=String(s.speedPercent||100);fields.random.value=s.random?'1':'0';fields.repeat.value=s.repeat?'1':'0';fields.error.textContent=s.message||''}
+async function refreshGifs(){const res=await fetch('/api/gifs',{cache:'no-store'});const list=await res.json();if(!list.length){fields.gifs.textContent='Aucun GIF trouve dans /gifs.';return}fields.gifs.className='';fields.gifs.innerHTML=list.map(g=>`<div class="gif-row"><div><div class="gif-name">${esc(g.name)} ${g.current?'<span class="ok">actif</span>':''}</div><div class="gif-meta">${esc(g.path)} ? ${bytes(g.size)}</div></div><button type="button" data-play="${esc(g.path)}">Lire</button><button class="danger" type="button" data-delete="${esc(g.path)}" ${g.current?'disabled':''}>Supprimer</button></div>`).join('');fields.gifs.querySelectorAll('button[data-play]').forEach(b=>b.onclick=()=>playGif(b.dataset.play));fields.gifs.querySelectorAll('button[data-delete]').forEach(b=>b.onclick=()=>deleteGif(b.dataset.delete))}
+async function updatePlayback(params){const res=await fetch('/api/playback',{method:'POST',body:new URLSearchParams(params)});const s=await res.json();fields.error.textContent=s.message||'';await refresh();await refreshGifs()}async function playGif(path){const res=await fetch('/api/play',{method:'POST',body:new URLSearchParams({path})});const s=await res.json();fields.error.textContent=s.message||'';await refresh();await refreshGifs()}async function deleteGif(path){if(!confirm(`Supprimer ${path} ?`))return;const res=await fetch('/api/delete',{method:'POST',body:new URLSearchParams({path})});const s=await res.json();fields.error.textContent=s.message||'';await refresh();await refreshGifs()}
+fields.toggle.onclick=()=>updatePlayback({action:'toggle'});document.querySelectorAll('button[data-action]').forEach(b=>{if(b.id!=='toggle')b.onclick=()=>updatePlayback({action:b.dataset.action})});fields.speed.onchange=()=>updatePlayback({speed:fields.speed.value});fields.random.onchange=()=>updatePlayback({random:fields.random.value});fields.repeat.onchange=()=>updatePlayback({repeat:fields.repeat.value});fields.uploadForm.onsubmit=e=>{e.preventDefault();const file=fields.gifFile.files[0];if(!file)return;const data=new FormData();data.append('gif',file,file.name);const xhr=new XMLHttpRequest();fields.progress.value=0;fields.error.textContent='Televersement en cours...';xhr.upload.onprogress=e=>{if(e.lengthComputable)fields.progress.value=Math.round(e.loaded*100/e.total)};xhr.onload=async()=>{let s={};try{s=JSON.parse(xhr.responseText||'{}')}catch(e){}fields.error.textContent=s.message||(xhr.status<400?'Televersement termine':'Erreur televersement');fields.gifFile.value='';fields.progress.value=xhr.status<400?100:0;await refresh();await refreshGifs()};xhr.onerror=()=>{fields.error.textContent='Erreur reseau pendant le televersement';fields.progress.value=0};xhr.open('POST','/api/upload');xhr.send(data)};
+refresh();refreshGifs();setInterval(refresh,2000);setInterval(refreshGifs,5000);
+</script></body></html>
+)rawliteral";
+
+const char OTA_HTML[] PROGMEM = R"rawliteral(
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DemonEye OTA</title>
+  <style>
+    :root{color-scheme:dark;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#08040b;color:#f8edff}
+    body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at top,#421150,#08040b 58%)}
+    main{width:min(92vw,560px);padding:20px}.panel{border:1px solid #442759;border-radius:22px;background:#100b18;padding:22px;box-shadow:0 22px 70px rgba(0,0,0,.45)}
+    h1{margin:0 0 8px;font-size:2rem}p{color:#cdb7e2}form{display:grid;gap:14px;margin-top:18px}button{border:0;border-radius:14px;padding:14px;background:#ff315f;color:white;font-weight:900;font-size:1rem}
+    input{color:#fff}progress{width:100%;height:18px}.msg{min-height:1.3rem;color:#ffb3c1}a{color:#ffd166}
+  </style>
+</head>
+<body><main><section class="panel">
+  <h1>Mise a jour firmware</h1>
+  <p>Envoyez un fichier <code>.bin</code> compile pour cette carte ESP32-S2. L'appareil redemarre uniquement si Update confirme la mise a jour.</p>
+  <form id="form" enctype="multipart/form-data"><input id="firmware" name="firmware" type="file" accept=".bin,application/octet-stream" required><button type="submit">Mettre a jour</button><progress id="progress" value="0" max="100"></progress></form>
+  <p class="msg" id="msg"></p><p><a href="/">Retour interface</a></p>
+</section></main><script>
+const form=document.querySelector('#form'),file=document.querySelector('#firmware'),progress=document.querySelector('#progress'),msg=document.querySelector('#msg');
+form.onsubmit=e=>{e.preventDefault();if(!file.files[0])return;const data=new FormData();data.append('firmware',file.files[0],file.files[0].name);const xhr=new XMLHttpRequest();progress.value=0;msg.textContent='Mise a jour en cours. Ne coupez pas l alimentation.';xhr.upload.onprogress=e=>{if(e.lengthComputable)progress.value=Math.round(e.loaded*100/e.total)};xhr.onload=()=>{let s={};try{s=JSON.parse(xhr.responseText||'{}')}catch(e){}msg.textContent=s.message||(xhr.status<400?'Mise a jour reussie, redemarrage...':'Mise a jour echouee');progress.value=xhr.status<400?100:0};xhr.onerror=()=>{msg.textContent='Erreur reseau pendant OTA';progress.value=0};xhr.open('POST','/ota/update');xhr.send(data)};
+</script></body></html>
 )rawliteral";
 
 // ============================================================
@@ -405,6 +421,23 @@ void envoyerPageAccueil() {
   server.send_P(200, "text/html", PAGE_HTML);
 }
 
+bool authentifierOTA() {
+  if (server.authenticate(OTA_AUTH_USERNAME, OTA_AUTH_PASSWORD)) {
+    return true;
+  }
+
+  server.requestAuthentication(BASIC_AUTH, "DemonEye OTA");
+  return false;
+}
+
+void envoyerPageOTA() {
+  if (!authentifierOTA()) {
+    return;
+  }
+
+  server.send_P(200, "text/html", OTA_HTML);
+}
+
 void envoyerEtatJSON() {
   char reponse[640];
   char ipTexte[16];
@@ -425,7 +458,8 @@ void envoyerEtatJSON() {
     "{\"sd\":%s,\"gifName\":\"%s\",\"gifWidth\":%d,\"gifHeight\":%d,"
     "\"gifSize\":%lu,\"freeHeap\":%lu,\"ip\":\"%s\",\"paused\":%s,"
     "\"gifActive\":%s,\"sdBusy\":%s,\"speedPercent\":%u,"
-    "\"random\":%s,\"repeat\":%s,\"mode\":\"%s\",\"message\":\"%s\"}",
+    "\"random\":%s,\"repeat\":%s,\"mode\":\"%s\","
+    "\"firmwareVersion\":\"%s\",\"message\":\"%s\"}",
     carteSDDisponible ? "true" : "false",
     gifActuel,
     gifLargeur,
@@ -440,6 +474,7 @@ void envoyerEtatJSON() {
     modeAleatoire ? "true" : "false",
     repetitionActive ? "true" : "false",
     modeAleatoire ? "aleatoire" : "normal",
+    FIRMWARE_VERSION,
     dernierMessage
   );
 
@@ -618,6 +653,8 @@ void demarrerWiFi() {
   server.on("/api/upload", HTTP_POST, terminerUploadGIF, traiterUploadGIF);
   server.on("/api/delete", HTTP_POST, supprimerGIFDepuisWeb);
   server.on("/api/toggle", HTTP_POST, basculerLecture);
+  server.on("/ota", HTTP_GET, envoyerPageOTA);
+  server.on("/ota/update", HTTP_POST, terminerUploadOTA, traiterUploadOTA);
   server.onNotFound(envoyerIntrouvable);
   server.begin();
 
@@ -719,6 +756,10 @@ bool nomFichierGIFValide(const char* nom) {
 }
 
 int trouverGIFParChemin(const char* chemin) {
+  if (catalogueGIFs == nullptr) {
+    return -1;
+  }
+
   for (uint8_t i = 0; i < nombreGIFs; i++) {
     if (strcmp(catalogueGIFs[i].chemin, chemin) == 0) {
       return i;
@@ -729,7 +770,7 @@ int trouverGIFParChemin(const char* chemin) {
 }
 
 void ajouterGIFAuCatalogue(const char* nom, const char* chemin, uint32_t taille) {
-  if (nombreGIFs >= MAX_GIFS || !cheminGIFValide(chemin)) {
+  if (catalogueGIFs == nullptr || nombreGIFs >= MAX_GIFS || !cheminGIFValide(chemin)) {
     return;
   }
 
@@ -747,8 +788,29 @@ void ajouterGIFAuCatalogue(const char* nom, const char* chemin, uint32_t taille)
   nombreGIFs++;
 }
 
+bool initialiserCatalogueGIFs() {
+  if (catalogueGIFs != nullptr) {
+    return true;
+  }
+
+  catalogueGIFs = static_cast<EntreeGIF*>(calloc(MAX_GIFS, sizeof(EntreeGIF)));
+
+  if (catalogueGIFs == nullptr) {
+    nombreGIFs = 0;
+    definirMessage("Memoire insuffisante pour catalogue GIF");
+    return false;
+  }
+
+  return true;
+}
+
 void scannerCatalogueGIFs() {
   nombreGIFs = 0;
+
+  if (!initialiserCatalogueGIFs()) {
+    Serial.println("Scan /gifs ignore : catalogue indisponible.");
+    return;
+  }
 
   if (!carteSDDisponible) {
     Serial.println("Scan /gifs ignore : carte SD indisponible.");
@@ -1105,6 +1167,151 @@ void supprimerGIFDepuisWeb() {
   }
 }
 
+void traiterUploadOTA() {
+  if (!authentifierOTA()) {
+    return;
+  }
+
+  HTTPUpload& upload = server.upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    otaErreur = false;
+    otaOK = false;
+    otaMessage[0] = '\0';
+
+    if (!upload.filename.endsWith(".bin")) {
+      otaErreur = true;
+      strncpy(otaMessage, "Firmware refuse : extension .bin requise", sizeof(otaMessage) - 1);
+      otaMessage[sizeof(otaMessage) - 1] = '\0';
+      definirMessage(otaMessage);
+      return;
+    }
+
+    suspendreAnimationPourSD();
+    definirMessage("Mise a jour OTA en cours");
+
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      otaErreur = true;
+      Update.printError(Serial);
+      snprintf(
+        otaMessage,
+        sizeof(otaMessage),
+        "Update.begin echoue, erreur %u",
+        Update.getError()
+      );
+      definirMessage(otaMessage);
+      Update.abort();
+      reprendreAnimationApresSD();
+      return;
+    }
+
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_WRITE) {
+    if (otaErreur) {
+      return;
+    }
+
+    size_t ecrit = Update.write(upload.buf, upload.currentSize);
+
+    if (ecrit != upload.currentSize) {
+      otaErreur = true;
+      Update.printError(Serial);
+      snprintf(
+        otaMessage,
+        sizeof(otaMessage),
+        "Update.write incomplet, erreur %u",
+        Update.getError()
+      );
+      definirMessage(otaMessage);
+      Update.abort();
+      reprendreAnimationApresSD();
+    }
+
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_END) {
+    if (otaErreur) {
+      if (ecritureSDEnCours) {
+        reprendreAnimationApresSD();
+      }
+      return;
+    }
+
+    if (!Update.end(true)) {
+      otaErreur = true;
+      Update.printError(Serial);
+      snprintf(
+        otaMessage,
+        sizeof(otaMessage),
+        "Update.end echoue, erreur %u",
+        Update.getError()
+      );
+      definirMessage(otaMessage);
+      Update.abort();
+      reprendreAnimationApresSD();
+      return;
+    }
+
+    if (!Update.isFinished()) {
+      otaErreur = true;
+      strncpy(otaMessage, "Update incomplete", sizeof(otaMessage) - 1);
+      otaMessage[sizeof(otaMessage) - 1] = '\0';
+      definirMessage(otaMessage);
+      Update.abort();
+      reprendreAnimationApresSD();
+      return;
+    }
+
+    otaOK = true;
+    strncpy(otaMessage, "Mise a jour reussie, redemarrage", sizeof(otaMessage) - 1);
+    otaMessage[sizeof(otaMessage) - 1] = '\0';
+    definirMessage(otaMessage);
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_ABORTED) {
+    otaErreur = true;
+    strncpy(otaMessage, "Mise a jour OTA interrompue", sizeof(otaMessage) - 1);
+    otaMessage[sizeof(otaMessage) - 1] = '\0';
+    definirMessage(otaMessage);
+    Update.abort();
+
+    if (ecritureSDEnCours) {
+      reprendreAnimationApresSD();
+    }
+  }
+}
+
+void terminerUploadOTA() {
+  if (!authentifierOTA()) {
+    return;
+  }
+
+  if (otaOK) {
+    server.send(200, "application/json", "{\"ok\":true,\"message\":\"Mise a jour reussie, redemarrage\"}");
+    delay(250);
+    ESP.restart();
+    return;
+  }
+
+  if (ecritureSDEnCours) {
+    reprendreAnimationApresSD();
+  }
+
+  char reponse[220];
+  snprintf(
+    reponse,
+    sizeof(reponse),
+    "{\"ok\":false,\"message\":\"%s\"}",
+    otaMessage[0] == '\0' ? "Mise a jour echouee" : otaMessage
+  );
+
+  server.send(400, "application/json", reponse);
+}
+
 // ============================================================
 // Ouverture et demarrage de l'animation
 // ============================================================
@@ -1320,7 +1527,7 @@ void redemarrerGIFActuel() {
 }
 
 void jouerGIFSuivant() {
-  if (nombreGIFs == 0) {
+  if (catalogueGIFs == nullptr || nombreGIFs == 0) {
     definirMessage("Aucun GIF dans /gifs");
     return;
   }
@@ -1339,7 +1546,7 @@ void jouerGIFSuivant() {
 }
 
 void jouerGIFPrecedent() {
-  if (nombreGIFs == 0) {
+  if (catalogueGIFs == nullptr || nombreGIFs == 0) {
     definirMessage("Aucun GIF dans /gifs");
     return;
   }
@@ -1431,7 +1638,7 @@ void setup() {
 
   Serial.println("GIF de secours /eye.gif indisponible ou invalide.");
 
-  if (nombreGIFs > 0 && lancerGIF(catalogueGIFs[0].chemin)) {
+  if (catalogueGIFs != nullptr && nombreGIFs > 0 && lancerGIF(catalogueGIFs[0].chemin)) {
     return;
   }
 
