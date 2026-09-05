@@ -1687,6 +1687,7 @@ void loop() {
     return;
   }
 
+  uint32_t debutFrameMs = millis();
   int delaiFrameMs = 0;
 
   // false : ne pas bloquer avec delay(); le rythme est gere avec millis().
@@ -1706,7 +1707,7 @@ void loop() {
       prochaineFrameMs = millis() + GIF_RESTART_DELAY_MS;
     }
   } else {
-    prochaineFrameMs = millis() + delaiFrameAjuste(delaiFrameMs);
+    prochaineFrameMs = debutFrameMs + delaiFrameAjuste(delaiFrameMs);
   }
 
   server.handleClient();
