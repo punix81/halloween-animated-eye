@@ -41,6 +41,12 @@ jobs:
           arduino-cli lib install "Adafruit GC9A01A@$ADAFRUIT_GC9A01A_VERSION"
           arduino-cli lib install "AnimatedGIF@$ANIMATEDGIF_VERSION"
 
+      - name: Prepare Arduino sketch folder
+        run: |
+          mkdir -p /tmp/halloween_Globe_eye
+          cp halloween_Globe_eye.ino /tmp/halloween_Globe_eye/
+          cp config.example.h /tmp/halloween_Globe_eye/
+
       - name: Compile sketch
         run: >
           arduino-cli compile
@@ -48,4 +54,4 @@ jobs:
           --warnings all
           --export-binaries
           --build-property "compiler.cpp.extra_flags=-DDEMON_EYE_ALLOW_EXAMPLE_OTA_PASSWORD"
-          .
+          /tmp/halloween_Globe_eye
